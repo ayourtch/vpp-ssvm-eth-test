@@ -6,13 +6,12 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
 #include "ssvm_eth.h"
+#include <inttypes.h>
 
 ssvm_eth_main_t ssvm_eth_main;
 
@@ -28,12 +27,9 @@ typedef enum {
   SSVM_ETH_TX_N_ERROR,
 } ssvm_eth_tx_func_error_t;
 
-static u32 ssvm_eth_flag_change (vnet_main_t * vnm, 
-                                 vnet_hw_interface_t * hi,
-                                 u32 flags);
-
 int ssvm_eth_create (ssvm_eth_main_t * em, u8 * name, int is_master)
 {
+  // ssvm_eth_main_t * em = &ssvm_eth_main;
   ssvm_private_t * intfc;
   void * oldheap;
   clib_error_t * e;
@@ -109,31 +105,13 @@ int ssvm_eth_create (ssvm_eth_main_t * em, u8 * name, int is_master)
   enet_addr[2] = is_master;
   enet_addr[5] = sh->master_index;
   
-  e = ethernet_register_interface
-    (em->vnet_main, ssvm_eth_device_class.index,
-     intfc - em->intfcs,
-     /* ethernet address */ enet_addr,
-     &intfc->vlib_hw_if_index, 
-     ssvm_eth_flag_change);
-
-  if (e)
-    {
-      clib_error_report (e);
-      /* $$$$ unmap offending region? */
-      return VNET_API_ERROR_INVALID_INTERFACE;
-    }
-
-  /* Declare link up */
-  vnet_hw_interface_set_flags (em->vnet_main, intfc->vlib_hw_if_index, 
-                               VNET_HW_INTERFACE_FLAG_LINK_UP);
-
   /* Let the games begin... */
   if (is_master)
       sh->ready = 1;
   return 0;
 }
 
-static clib_error_t *
+clib_error_t *
 ssvm_config (vlib_main_t * vm, unformat_input_t * input)
 {
   u8 * name;
@@ -153,8 +131,10 @@ ssvm_config (vlib_main_t * vm, unformat_input_t * input)
         ;
       else if (unformat (input, "slave"))
         is_master = 0;
-      else if (unformat (input, "%s", &name))
+      else if (unformat (input, "%s", &name)) {
         vec_add1 (em->names, name);
+        printf("AYXX: adding %s\n", name);
+        }
       else
         break;
     }
@@ -171,15 +151,11 @@ ssvm_config (vlib_main_t * vm, unformat_input_t * input)
                                   em->names[i], rv);
     }
 
-  vlib_node_set_state (vm, ssvm_eth_input_node.index, VLIB_NODE_STATE_POLLING);
-
   return 0;
 }
 
-VLIB_CONFIG_FUNCTION (ssvm_config, "ssvm_eth");
 
-
-static clib_error_t * ssvm_eth_init (vlib_main_t * vm)
+clib_error_t * ssvm_eth_init ()
 {
   ssvm_eth_main_t * em = &ssvm_eth_main;
 
@@ -188,9 +164,6 @@ static clib_error_t * ssvm_eth_init (vlib_main_t * vm)
     clib_warning ("ssvm_eth_queue_elt_t size %d not a multiple of %d",
                   sizeof(ssvm_eth_queue_elt_t), CLIB_CACHE_LINE_BYTES);
 
-  em->vlib_main = vm;
-  em->vnet_main = vnet_get_main();
-  em->elog_main = &vm->elog_main;
 
   /* default config param values... */
 
@@ -234,14 +207,12 @@ static u8 * format_ssvm_eth_tx_trace (u8 * s, va_list * args)
 }
 
 
-static uword
-ssvm_eth_interface_tx (vlib_main_t * vm,
-                       vlib_node_runtime_t * node,
-                       vlib_frame_t * f)
+uword
+ssvm_eth_interface_tx (ssvm_private_t * intfc, char *buf_to_send, int len_to_send)
+// , 
+  //                     vlib_frame_t * f)
 {
   ssvm_eth_main_t * em = &ssvm_eth_main;
-  vnet_interface_output_runtime_t * rd = (void *) node->runtime_data;
-  ssvm_private_t * intfc = vec_elt_at_index (em->intfcs, rd->dev_instance);
   ssvm_shared_header_t * sh = intfc->sh;
   unix_shared_memory_queue_t * q;
   u32 * from;
@@ -268,13 +239,16 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
 
   queue_lock = (u32 *) q;
 
-  from = vlib_frame_vector_args (f);
-  n_left = f->n_vectors;
+  // from = vlib_frame_vector_args (f);
+  //n_left = f->n_vectors;
+  n_left = 1;
+
   is_ring_full = 0;
   interface_down = 0;
 
   n_present_in_cache = vec_len (em->chunk_cache);
 
+#ifdef XXX
   /* admin / link up/down check */
   if (sh->opaque [MASTER_ADMIN_STATE_INDEX] == 0 ||
       sh->opaque [SLAVE_ADMIN_STATE_INDEX] == 0)
@@ -282,6 +256,7 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
       interface_down = 1;
       goto out;
     }
+#endif
 
   ssvm_lock (sh, my_pid, 1);
 
@@ -289,12 +264,15 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
   elt_indices = (u32 *) (sh->opaque [CHUNK_POOL_FREELIST_INDEX]);
   n_available = (u32) pointer_to_uword(sh->opaque [CHUNK_POOL_NFREE]);
 
+  printf("AYXX: n_left: %d, n_present_in_cache: %d\n", n_left, n_present_in_cache);
+
   if (n_present_in_cache < n_left*2)
     {
       vec_validate (em->chunk_cache, 
                     n_to_alloc + n_present_in_cache - 1);
 
       n_allocated = n_to_alloc < n_available ? n_to_alloc : n_available;
+      printf("AYXX: n_allocated: %d, n_to_alloc: %d, n_available: %d\n", n_allocated, n_to_alloc, n_available);
 
       if (PREDICT_TRUE(n_allocated > 0))
 	{
@@ -311,16 +289,20 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
 
   ssvm_unlock (sh);
 
+  printf("AYXX: n_present_in_cache: %d, n_left: %d\n", n_present_in_cache, n_left);
+
   while (n_left)
     {
-      bi0 = from[0];
-      b0 = vlib_get_buffer (vm, bi0);
+      // bi0 = from[0];
+      // b0 = vlib_get_buffer (vm, bi0);
       
-      size_this_buffer = vlib_buffer_length_in_chain (vm, b0);
+      // size_this_buffer = vlib_buffer_length_in_chain (vm, b0);
+      size_this_buffer = len_to_send;
       chunks_this_buffer = (size_this_buffer + (SSVM_BUFFER_SIZE - 1))
         / SSVM_BUFFER_SIZE;
 
       /* If we're not going to be able to enqueue the buffer, tail drop. */
+      printf("AYXX q cursize: %d, maxsize: %d\n", q->cursize, q->maxsize);
       if (q->cursize >= q->maxsize)
         {
           is_ring_full = 1;
@@ -339,14 +321,15 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
 
           elt->type = SSVM_PACKET_TYPE;
           elt->flags = 0;
-          elt->total_length_not_including_first_buffer = 
-            b0->total_length_not_including_first_buffer;
-          elt->length_this_buffer = b0->current_length;
+          elt->total_length_not_including_first_buffer = len_to_send;
+            // b0->total_length_not_including_first_buffer;
+          elt->length_this_buffer = len_to_send; // b0->current_length;
           elt->current_data_hint = b0->current_data;
           elt->owner = !i_am_master;
           elt->tag = 1;
 	  
-          memcpy (elt->data, b0->data + b0->current_data, b0->current_length);
+          // memcpy (elt->data, b0->data + b0->current_data, b0->current_length);
+          memcpy(elt->data, buf_to_send, len_to_send);
           
           if (PREDICT_FALSE (prev_elt != 0))
             prev_elt->next_index = elt - elts;
@@ -355,7 +338,7 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
             {
               elt->flags = SSVM_BUFFER_NEXT_PRESENT;
               ASSERT (b0->flags & VLIB_BUFFER_NEXT_PRESENT);
-              b0 = vlib_get_buffer (vm, b0->next_buffer);
+              // b0 = vlib_get_buffer (vm, b0->next_buffer);
             }
           prev_elt = elt;
         }
@@ -372,6 +355,7 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
     }
 
  out:
+/*
   if (PREDICT_FALSE(n_left))
     {
       if (is_ring_full)
@@ -388,25 +372,20 @@ ssvm_eth_interface_tx (vlib_main_t * vm,
     }
   else
       vlib_buffer_free (vm, vlib_frame_vector_args (f), f->n_vectors);
+*/
 
   if (PREDICT_TRUE(vec_len(em->chunk_cache)))
       _vec_len(em->chunk_cache) = n_present_in_cache;
 
-  return f->n_vectors;
+  //return f->n_vectors;
+  return 1;
 }
 
-static void ssvm_eth_clear_hw_interface_counters (u32 instance)
+clib_error_t *
+ssvm_eth_interface_admin_up_down (ssvm_private_t * intfc, u32 flags)
 {
-  /* Nothing for now */
-}
-
-static clib_error_t *
-ssvm_eth_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
-{
-  vnet_hw_interface_t * hif = vnet_get_hw_interface (vnm, hw_if_index);
   uword is_up = (flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP) != 0;
   ssvm_eth_main_t * em = &ssvm_eth_main;
-  ssvm_private_t * intfc = vec_elt_at_index (em->intfcs, hif->dev_instance);
   ssvm_shared_header_t * sh;
 
   /* publish link-state in shared-memory, to discourage buffer-wasting */
@@ -415,62 +394,25 @@ ssvm_eth_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
     sh->opaque [MASTER_ADMIN_STATE_INDEX] = (void *) is_up;
   else
     sh->opaque [SLAVE_ADMIN_STATE_INDEX] = (void *) is_up;
-    
+
   return 0;
 }
 
-static clib_error_t *
-ssvm_eth_subif_add_del_function (vnet_main_t * vnm,
-                                 u32 hw_if_index,
-                                 struct vnet_sw_interface_t * st,
-                                 int is_add)
-{
-  /* Nothing for now */
-  return 0;
-}
-
-/*
- * Dynamically redirect all pkts from a specific interface
- * to the specified node
- */
-static void 
-ssvm_eth_set_interface_next_node (vnet_main_t *vnm, u32 hw_if_index,
-                                  u32 node_index)
-{
+void ssvm_eth_print_config() {
   ssvm_eth_main_t * em = &ssvm_eth_main;
-  vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, hw_if_index);
-  ssvm_private_t * intfc = pool_elt_at_index (em->intfcs, hw->dev_instance);
-  
-  /* Shut off redirection */
-  if (node_index == ~0)
-    {
-      intfc->per_interface_next_index = node_index;
-      return;
-    }
-  
-  intfc->per_interface_next_index = 
-    vlib_node_add_next (em->vlib_main, ssvm_eth_input_node.index, node_index);
+
+  printf("base VA: %" PRIu64 " segment_size: %" PRIu64 " nbuffers %"PRIu64" queue_elts %"PRIu64"\n", em->next_base_va, em->segment_size, em->nbuffers, em->queue_elts);
 }
 
-static u32 ssvm_eth_flag_change (vnet_main_t * vnm, 
-                                 vnet_hw_interface_t * hi,
-                                 u32 flags)
-{
-    /* nothing for now */
-    return 0;
+
+
+
+void run_interface_tx(char *buf, int len) {
+  ssvm_private_t * intfc = &ssvm_eth_main.intfcs[0];
+
+  ssvm_eth_interface_admin_up_down(intfc, VNET_SW_INTERFACE_FLAG_ADMIN_UP);
+
+  ssvm_eth_interface_tx(intfc, buf, len);
+
 }
 
-VNET_DEVICE_CLASS (ssvm_eth_device_class) = {
-  .name = "ssvm-eth",
-  .tx_function = ssvm_eth_interface_tx,
-  .tx_function_n_errors = SSVM_ETH_TX_N_ERROR,
-  .tx_function_error_strings = ssvm_eth_tx_func_error_strings,
-  .format_device_name = format_ssvm_eth_device_name,
-  .format_device = format_ssvm_eth_device,
-  .format_tx_trace = format_ssvm_eth_tx_trace,
-  .clear_counters = ssvm_eth_clear_hw_interface_counters,
-  .admin_up_down_function = ssvm_eth_interface_admin_up_down,
-  .subif_add_del_function = ssvm_eth_subif_add_del_function,
-  .rx_redirect_to_node = ssvm_eth_set_interface_next_node,
-  .no_flatten_output_chains = 1,
-};

@@ -15,7 +15,6 @@
 #ifndef __included_ssvm_eth_h__
 #define __included_ssvm_eth_h__
 
-#include <vnet/vnet.h>
 
 #include <vppinfra/elog.h>
 #include <vppinfra/error.h>
@@ -24,14 +23,15 @@
 #include <vppinfra/vec.h>
 #include <vppinfra/elog.h>
 #include <vlib/vlib.h>
-#include <vnet/ethernet/ethernet.h>
-#include <vnet/ip/ip.h>
-#include <vnet/pg/pg.h>
 #include <vlibmemory/unix_shared_memory_queue.h>
 
 #include <ssvm.h>
 
-extern vnet_device_class_t ssvm_eth_device_class;
+
+/* stolen from interface.h */
+#define VNET_SW_INTERFACE_FLAG_ADMIN_UP (1 << 0)
+
+
 extern vlib_node_registration_t ssvm_eth_input_node;
 
 #define SSVM_BUFFER_SIZE  \
@@ -75,7 +75,6 @@ typedef struct {
 
   /* convenience */
   vlib_main_t * vlib_main;
-  vnet_main_t * vnet_main;
   elog_main_t * elog_main;
 } ssvm_eth_main_t;
 
